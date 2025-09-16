@@ -63,6 +63,8 @@ else:
 
 torch.backends.cuda.matmul.allow_tf32 = False
 
+DEVICE_TYPE = acc.type if (acc := torch.accelerator.current_accelerator()) else "cpu"
+BACKEND = dist.get_default_backend_for_device(DEVICE_TYPE)
 
 def gpus_for_rank(world_size):
     """Multigpu tests are designed to simulate the multi nodes with multi
@@ -70,8 +72,8 @@ def gpus_for_rank(world_size):
     On a single node, all visible GPUs are evenly
     divided to subsets, each process only uses a subset.
     """
-    visible_devices = list(range(torch.cuda.device_count()))
-    gpus_per_process = torch.cuda.device_count() // world_size
+    visible_devices = list(range(torch.accelerator.device_count()))
+    gpus_per_process = torch.accelerator.device_count() // world_size
     gpus_for_rank = []
     for rank in range(world_size):
         gpus_for_rank.append(
@@ -360,7 +362,7 @@ class CommonDistributedDataParallelTest:
         gradient_as_bucket_view=False,
     ):
         model = Net()
-        device = devices[0] if devices else torch.device(f"cuda:{self.rank:d}")
+        device = devices[0] if devices else torch.device(f"{DEVICE_TYPE}:{self.rank:d}")
         ddp_model = DistributedDataParallel(
             copy.deepcopy(model).to(device),
             device_ids=device_ids,
@@ -401,7 +403,7 @@ class CommonDistributedDataParallelTest:
             gradient_as_bucket_view=gradient_as_bucket_view,
         )
 
-        input = torch.randn(global_batch_size, 2).cuda(devices[0])
+        input = torch.randn(global_batch_size, 2).to(devices[0])
         target = torch.randn(global_batch_size, 4)
 
         return model, ddp_model, input, target
@@ -435,10 +437,10 @@ class CommonDistributedDataParallelTest:
         allow_none_grads=False,
     ):
         # to reproduce the same training results
-        torch.cuda.set_device(self.rank)
+        torch.accelerator.set_device(self.rank)
         torch.manual_seed(31415)
-        model = copy.deepcopy(input_model).cuda()
-        ddp_model = copy.deepcopy(input_model).cuda()
+        model = copy.deepcopy(input_model).to(DEVICE_TYPE)
+        ddp_model = copy.deepcopy(input_model).to(DEVICE_TYPE)
         ddp_model = nn.parallel.DistributedDataParallel(
             ddp_model,
             bucket_cap_mb=1,
@@ -554,8 +556,8 @@ class CommonDistributedDataParallelTest:
     def _prepare_dummy_data(self):
         ddp_bs = 16
         bs = ddp_bs * self.world_size
-        input = torch.rand((bs, 20), device="cuda", requires_grad=True)
-        target = torch.randn((bs, 20), device="cuda")
+        input = torch.rand((bs, 20), device=DEVICE_TYPE, requires_grad=True)
+        target = torch.randn((bs, 20), device=DEVICE_TYPE)
         offset = self.rank * ddp_bs
         ddp_input = input[offset : offset + ddp_bs]
         ddp_target = target[offset : offset + ddp_bs]
@@ -715,7 +717,7 @@ class CommonDistributedDataParallelTest:
         Test that checkpointing with weight sharing works.
         """
         process_group = self._get_process_group()
-        torch.cuda.set_device(self.rank)
+        torch.accelerator.set_device(self.rank)
         for use_bucket_view, static_graph in product((False, True), (False, True)):
             torch.manual_seed(31415)
             l1 = nn.Linear(20, 20)
@@ -738,7 +740,7 @@ class CommonDistributedDataParallelTest:
         same layer twice and having weights shared across layers.
         """
         process_group = self._get_process_group()
-        torch.cuda.set_device(self.rank)
+        torch.accelerator.set_device(self.rank)
         for use_bucket_view in (True, False):
             self._test_ddp_checkpointing(
                 self.CheckpointTwiceModuleWeightSharing(),
@@ -1968,8 +1970,8 @@ class ProcessGroupWithDispatchedCollectivesTests(MultiProcessTestCase):
 
     def test_init_process_group_optional_backend(self):
         store = dist.FileStore(self.file_name, self.world_size)
-        # creates both gloo and nccl backend
-        if dist.is_gloo_available() and dist.is_nccl_available():
+        # creates both gloo and accelerator backend
+        if dist.is_gloo_available() and dist.is_backend_available(BACKEND):
             dist.init_process_group(
                 store=store,
                 rank=self.rank,
